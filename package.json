@@ -1,0 +1,17 @@
+{
+  "name": "cryptos-ico-smart-contract",
+  "version": "1.0.0",
+  "description": "Cryptos ICO Smart Contract — manual ERC20 and crowdsale on Hardhat",
+  "scripts": {
+    "test": "hardhat test",
+    "compile": "hardhat compile",
+    "deploy": "hardhat run scripts/deploy.js"
+  },
+  "keywords": ["solidity", "hardhat", "ico", "erc20"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "hh2",
+    "hardhat": "^2.22.19"
+  }
+}
