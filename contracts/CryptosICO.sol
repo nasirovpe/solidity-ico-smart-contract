@@ -33,6 +33,8 @@ contract CryptosICO {
 
     mapping(address => uint256) public investedAmount;
 
+    bool private _investLocked;
+
     enum State {
         PreSale,
         Running,
@@ -72,6 +74,8 @@ contract CryptosICO {
     error SaleStillActive();
     error NothingToBurn();
     error TransferFailed();
+    error ReentrancyGuard();
+    error InvalidSaleEconomics();
 
     modifier onlyAdmin() {
         if (msg.sender != admin) revert NotAdmin();
@@ -95,9 +99,14 @@ contract CryptosICO {
             revert ZeroAddress();
         }
         if (_tokenPrice == 0) revert InvalidAmount();
+        if (_hardCap == 0 || _tokensForSale == 0) revert InvalidAmount();
         if (_minInvestment > _maxInvestment) revert InvalidAmount();
         if (_saleStartTime >= _saleEndTime) revert InvalidAmount();
         if (_tokenTradeStartTime < _saleEndTime) revert InvalidAmount();
+
+        uint256 maxRaiseForSale = (_tokensForSale * _tokenPrice) /
+            (10 ** decimals);
+        if (_hardCap > maxRaiseForSale) revert InvalidSaleEconomics();
 
         admin = _admin;
         depositWallet = _depositWallet;
@@ -165,6 +174,9 @@ contract CryptosICO {
     }
 
     function invest() public payable {
+        if (_investLocked) revert ReentrancyGuard();
+        _investLocked = true;
+
         if (halted) revert ICOHalted();
         if (
             block.timestamp < saleStartTime || block.timestamp > saleEndTime
@@ -195,6 +207,8 @@ contract CryptosICO {
 
         (bool sent, ) = depositWallet.call{value: msg.value}("");
         if (!sent) revert TransferFailed();
+
+        _investLocked = false;
     }
 
     receive() external payable {
@@ -230,14 +244,17 @@ contract CryptosICO {
     function burnUnsoldTokens() external onlyAdmin {
         if (block.timestamp <= saleEndTime) revert SaleStillActive();
 
-        uint256 unsold = _balances[address(this)];
-        if (unsold == 0) revert NothingToBurn();
+        uint256 unsoldAmount = tokensForSale - tokensSold;
+        if (unsoldAmount == 0) revert NothingToBurn();
 
-        _balances[address(this)] = 0;
-        _totalSupply -= unsold;
+        uint256 contractBalance = _balances[address(this)];
+        if (contractBalance < unsoldAmount) revert InsufficientBalance();
 
-        emit Transfer(address(this), address(0), unsold);
-        emit UnsoldTokensBurned(unsold);
+        _balances[address(this)] = contractBalance - unsoldAmount;
+        _totalSupply -= unsoldAmount;
+
+        emit Transfer(address(this), address(0), unsoldAmount);
+        emit UnsoldTokensBurned(unsoldAmount);
     }
 
     function _transfer(address from, address to, uint256 amount) private {

@@ -167,6 +167,87 @@ describe("CryptosICO", function () {
         ico.connect(investor1).invest({ value: MIN_INVESTMENT })
       ).to.be.revertedWithCustomError(ico, "SaleNotActive");
     });
+
+    it("rejects investment when token reserve is exhausted", async function () {
+      const tokensForSale = ethers.parseEther("100");
+      const hardCap = ethers.parseEther("0.1");
+      const reserveIco = await deployICO({ tokensForSale, hardCap });
+      await reserveIco.waitForDeployment();
+      await time.increaseTo(saleStart + 1);
+
+      const addr = await reserveIco.getAddress();
+      const raisedAmountSlot = 7;
+      const tokensSoldSlot = 14;
+      await ethers.provider.send("hardhat_setStorageAt", [
+        addr,
+        ethers.zeroPadValue(ethers.toBeHex(tokensSoldSlot), 32),
+        ethers.zeroPadValue(ethers.toBeHex(tokensForSale - 1n), 32),
+      ]);
+      await ethers.provider.send("hardhat_setStorageAt", [
+        addr,
+        ethers.zeroPadValue(ethers.toBeHex(raisedAmountSlot), 32),
+        ethers.zeroPadValue(ethers.toBeHex(0n), 32),
+      ]);
+
+      await expect(
+        reserveIco.connect(investor2).invest({ value: MIN_INVESTMENT })
+      ).to.be.revertedWithCustomError(reserveIco, "InsufficientTokensForSale");
+    });
+  });
+
+  describe("Constructor validation", function () {
+    it("rejects zero hardCap", async function () {
+      const CryptosICO = await ethers.getContractFactory("CryptosICO");
+      await expect(deployICO({ hardCap: 0n })).to.be.revertedWithCustomError(
+        CryptosICO,
+        "InvalidAmount"
+      );
+    });
+
+    it("rejects zero tokensForSale", async function () {
+      const CryptosICO = await ethers.getContractFactory("CryptosICO");
+      await expect(
+        deployICO({ tokensForSale: 0n })
+      ).to.be.revertedWithCustomError(CryptosICO, "InvalidAmount");
+    });
+
+    it("rejects hardCap above sale token inventory economics", async function () {
+      const CryptosICO = await ethers.getContractFactory("CryptosICO");
+      const maxRaise = (TOKENS_FOR_SALE * TOKEN_PRICE) / 10n ** 18n;
+      const excessiveCap = maxRaise + 1n;
+      await expect(
+        deployICO({ hardCap: excessiveCap })
+      ).to.be.revertedWithCustomError(CryptosICO, "InvalidSaleEconomics");
+    });
+  });
+
+  describe("Reentrancy guard", function () {
+    it("allows normal investment with EOA deposit wallet", async function () {
+      await time.increaseTo(saleStart + 1);
+      await expect(
+        ico.connect(investor1).invest({ value: MIN_INVESTMENT })
+      ).to.emit(ico, "Invested");
+    });
+
+    it("blocks reentrant invest via deposit wallet callback", async function () {
+      const reentrantIco = await deployICO();
+      await reentrantIco.waitForDeployment();
+      const reentrantWallet = await (
+        await ethers.getContractFactory("ReentrantDepositWallet")
+      ).deploy(await reentrantIco.getAddress());
+      await reentrantWallet.waitForDeployment();
+      await reentrantIco
+        .connect(admin)
+        .changeDepositAddress(await reentrantWallet.getAddress());
+
+      await time.increaseTo(saleStart + 1);
+      await expect(
+        reentrantIco.connect(investor1).invest({ value: MIN_INVESTMENT })
+      ).to.be.revertedWithCustomError(reentrantIco, "TransferFailed");
+
+      expect(await reentrantIco.raisedAmount()).to.equal(0n);
+      expect(await reentrantIco.balanceOf(investor1.address)).to.equal(0n);
+    });
   });
 
   describe("Investment timing", function () {
@@ -340,6 +421,40 @@ describe("CryptosICO", function () {
       await expect(
         ico.connect(other).burnUnsoldTokens()
       ).to.be.revertedWithCustomError(ico, "NotAdmin");
+    });
+
+    it("reverts when there are no unsold tokens to burn", async function () {
+      const tokensForSale = ethers.parseEther("100");
+      const hardCap = ethers.parseEther("0.1");
+      const soldOutIco = await deployICO({ tokensForSale, hardCap });
+      await soldOutIco.waitForDeployment();
+      await time.increaseTo(saleStart + 1);
+      await soldOutIco.connect(investor1).invest({ value: MIN_INVESTMENT });
+      await time.increaseTo(saleEnd + 1);
+
+      await expect(
+        soldOutIco.connect(admin).burnUnsoldTokens()
+      ).to.be.revertedWithCustomError(soldOutIco, "NothingToBurn");
+    });
+
+    it("burns only unsold reserve, not extra tokens sent to the contract", async function () {
+      await time.increaseTo(saleEnd + 1);
+      await time.increaseTo(tokenTradeStart + 1);
+
+      const contractAddr = await ico.getAddress();
+      const sold = await ico.tokensSold();
+      const unsoldReserve = TOKENS_FOR_SALE - sold;
+      const extra = ethers.parseEther("1000");
+
+      await ico.connect(admin).transfer(contractAddr, extra);
+
+      const supplyBefore = await ico.totalSupply();
+      await expect(ico.connect(admin).burnUnsoldTokens())
+        .to.emit(ico, "UnsoldTokensBurned")
+        .withArgs(unsoldReserve);
+
+      expect(await ico.balanceOf(contractAddr)).to.equal(extra);
+      expect(await ico.totalSupply()).to.equal(supplyBefore - unsoldReserve);
     });
   });
 
